@@ -3,6 +3,7 @@ from ckan.common import config, session, _
 from ckan.lib.dictization import model_dictize
 from ckanext.ytp_request.model import MemberRequest
 from ckanext.ytp_request.helper import get_organization_admins
+from datetime import datetime
 from sqlalchemy import desc
 from sqlalchemy.sql.expression import or_
 from ckan.plugins import toolkit
@@ -44,25 +45,31 @@ def member_request(context, data_dict):
 
 
 def member_requests_mylist(context, data_dict):
-    ''' Users will see a list of their member requests
-    '''
+    ''' Users will see a list of their member requests '''
     logic.check_access('member_requests_mylist', context, data_dict)
 
     user = context.get('user', None)
 
     user_object = model.User.get(user)
-    # Return current state for memberships for all organizations for the user
-    # in context. (last modified date)
+
+    # Collect standard CKAN membership requests
     membership_requests = model.Session.query(model.Member).filter(
         model.Member.table_id == user_object.id).all()
     results = _membership_request_list_dictize(membership_requests, context)
 
-    # Inject synthetic Auth0-based pending orgs (from login session)
-    pending_ids = session.get("ckanext:oidc-pkce:pending_org_ids", [])
+    def _format_iso_date(iso_ts):
+        try:
+            dt = datetime.fromisoformat(iso_ts.replace("Z", "+00:00"))
+            return dt.strftime("%d - %B - %Y")
+        except Exception:
+            return iso_ts[:10] if iso_ts else None
+
+    pending_orgs = session.get("ckanext:oidc-pkce:pending_org_ids", [])
     existing_ids = {r["organization_id"] for r in results}
 
-    for org_id in pending_ids:
-        if org_id in existing_ids:
+    for pending in pending_orgs:
+        org_id = pending.get("id")
+        if not org_id or org_id in existing_ids:
             continue
 
         try:
@@ -70,16 +77,28 @@ def member_requests_mylist(context, data_dict):
         except toolkit.ObjectNotFound:
             org = {"id": org_id, "title": org_id, "name": org_id}
 
+        status = pending.get("status", "pending").capitalize()
+        handler = pending.get("handler")
+        request_date_str = _format_iso_date(pending.get("request_date"))
+
+        message_parts = [f"{status} via Auth0"]
+        if handler:
+            message_parts.append(f"by {handler}")
+        if request_date_str:
+            message_parts.append(f"on {request_date_str}")
+
+        message = " ".join(message_parts)
+
         results.append({
             "organization_name": org["name"],
             "organization_display_name": org["title"],
             "organization_id": org_id,
-            "state": "pending",
+            "state": pending.get("status", "pending"),
             "role": None,
-            "message": "Pending via Auth0",
-            "request_date": None,
-            "handling_date": None,
-            "handled_by": None,
+            "message": message,
+            "request_date": request_date_str,
+            "handling_date": _format_iso_date(pending.get("handling_date")),
+            "handled_by": pending.get("handler"),
         })
 
     return results
